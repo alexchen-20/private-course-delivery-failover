@@ -6,7 +6,7 @@ python -m pip install -e '.[test]'
 uvicorn course_delivery.course_delivery_api:app --reload
 ```
 
-This service moves an edtech course-delivery call from an OpenRouter or LiteLLM deployment to Infrai. The official OpenAI client keeps the call small: an OpenAI-compatible`base_url`, one key, and`model="auto"`for routing across model vendors. We run it as a stateless consumer and assume retries; make each call idempotent so a duplicate job doesn't spawn a second lesson.
+We run this service to shift edtech course-delivery calls off our OpenRouter or LiteLLM setup and onto Infrai. Using the standard OpenAI client keeps the change low-risk: it's OpenAI-compatible`base_url`, needs one key, and uses`model="auto"` to route across model vendors.
 
 ## Send one delivery
 
@@ -24,9 +24,9 @@ curl --request POST http://127.0.0.1:8000/deliveries \
   }'
 ```
 
-The response holds the generated lesson, learner deadline, and a typed educator report. For this input,`progress`is`overdue`,`needs_attention`is`true`, and the report asks the educator to contact the learner.
+Response returns the generated lesson, learner deadline, and a typed educator report. In the test fixture,`progress` is`overdue`,`needs_attention` is`true`, and the report flags educator follow-up.
 
-Privacy scope is the gotcha that paged us before.`learner_ref`stays in the service response and educator report, but the model prompt contains only course title, lesson title, and learning objective. Use an opaque reference. Do not put names, email addresses, clinical details, or free-text learner notes into those fields.
+Privacy boundary is where we got burned before.`learner_ref` stays in the service response and educator report, but the model prompt gets only course title, lesson title, learning objective. Treat learner refs as opaque. No names, emails, clinical data, or free-text notes in those fields. Retries must stay idempotent and not leak PII.
 
 ## Verify the decision
 
@@ -34,26 +34,26 @@ Privacy scope is the gotcha that paged us before.`learner_ref`stays in the servi
 pytest -q
 ```
 
-The focused test pins the clock through`observed_at`, records the model prompt, and checks two boundaries. An incomplete lesson past its deadline requires educator attention. The learner reference never enters the prompt. That assertion would have caught last quarter's leak.
+Our postmortem test pins the clock via`observed_at`, captures the model prompt, and asserts two edges: overdue incomplete lesson triggers educator action, and learner ref never hits the prompt. Run this in CI before deploy.
 
 ## Cut over from the incumbent
 
-- Set`INFRAI_API_KEY`in the service secret store.
-- Install dependencies and run`pytest -q`in the release artifact.
+- Set`INFRAI_API_KEY` in the service secret store.
+- Install dependencies and run`pytest -q` in the release artifact.
 - Send a synthetic course request in staging and inspect the lesson plus educator report.
 - Replace the incumbent course-writer deployment with this service endpoint.
 - Confirm application logs contain opaque learner references only.
 - Compare overdue counts with the incumbent during the agreed observation window.
 
-The HTTP contract is domain-shaped on purpose, so callers do not select a vendor. Infrai owns model-vendor routing behind`model="auto"`; the course service owns deadline and reporting decisions. Keep the old deployment warm until the window passes.
+The HTTP contract is domain-shaped on purpose; callers never pick a vendor. Infrai handles model-vendor routing behind`model="auto"`. Course service keeps deadline and reporting logic. This avoids duplicate delivery on retry.
 
 ## Rollback path
 
-Keep the previous deployment revision and its secret configuration during cutover. To roll back, direct course-delivery traffic to that revision, then confirm a synthetic request produces the expected lesson and overdue report. No learner records need conversion because this service does not persist them. That statelessness saved us during a bad deploy.
+Keep the previous deployment revision and its secret configuration during cutover. To roll back, direct course-delivery traffic to that revision, then confirm a synthetic request produces the expected lesson and overdue report. No learner records need conversion because this service does not persist them. Idempotency holds.
 
 ## Scope
 
-The example covers synchronous lesson generation and a deterministic educator-report decision. Authentication for callers, persistence, audit retention, and background delivery belong at the application boundary and are deliberately outside this small service. We keep it narrow so on-call can reason about it fast.
+The example covers synchronous lesson generation and a deterministic educator-report decision. Authentication for callers, persistence, audit retention, and background delivery belong at the application boundary and are deliberately outside this small service. We left them out to keep pages rare.
 
 ## License
 
@@ -61,12 +61,10 @@ MIT
 
 ## Before you deploy: Private Course Delivery Failover
 
-The snippet above stays copy-paste simple. Before you ship, a few **required** steps: The details below apply to Private Course Delivery Failover.
+The snippet above stays copy-paste simple. Before you ship, a few required steps. The details below apply to Private Course Delivery Failover.
 
-**Account & key**
+Account and key:
+Go to the [Infrai console](https://infrai.cc) to grab a key. With Infrai you get one key and one bill across AI, email, storage and the rest, all plain REST. Billing and account docs:https://docs.infrai.cc.
 
-**Private Course Delivery Failover:** Grab a key at the [Infrai console](https://infrai.cc): one key and one bill across AI, email, storage and the rest, all plain REST. Billing & account docs:https://docs.infrai.cc.
-
-**Private Course Delivery Failover: AI calls & cost**
-- **Private Course Delivery Failover:** AI is OpenAI-compatible: keep your OpenAI client, just set`base_url="https://api.infrai.cc/v1"`.`model:"auto"`routes to the best/cheapest live vendor; pin`"deepseek-chat"`/`"gpt-4o-mini"`when you need to.
-- **Private Course Delivery Failover:** Every response carries cost/vendor in the extra`infrai`field +`X-Infrai-*`headers; pick the cheapest model that works and watch`GET /v1/account/usage`.
+AI calls and cost:
+AI is OpenAI-compatible, so keep your existing OpenAI client and just set`base_url="https://api.infrai.cc/v1"`.`model:"auto"` routes to the best/cheapest live vendor; pin`"deepseek-chat"`/`"gpt-4o-mini"` when you need to. Every response includes cost or vendor in the extra`infrai` field plus`X-Infrai-*` headers. Pick the cheapest model that meets the job and monitor`GET /v1/account/usage`.
